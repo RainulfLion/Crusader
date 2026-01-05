@@ -28,10 +28,17 @@ public class Health : MonoBehaviour, IDamageable
     public AudioSource audioSource;           // optional
     public AudioClip hurtClip;                // optional
     public AudioClip dieClip;                 // optional
+    public bool logAudio;
 
     [Header("Events")]
     public UnityEvent onHurt;
     public UnityEvent onDeath;
+
+    [Header("Weapon Drop")]
+    public bool dropWeaponOnDeath;
+    public Transform weaponRoot;
+    public bool disableWeaponTriggerCollidersOnDrop = true;
+    public float weaponDropUpOffset = 0.05f;
 
     public MonoBehaviour[] disableBehavioursOnDeath;
 
@@ -39,6 +46,36 @@ public class Health : MonoBehaviour, IDamageable
 
     private bool _deadLatched;
     private Coroutine _resetDieBoolRoutine;
+
+    private void DropWeaponIfConfigured()
+    {
+        if (!dropWeaponOnDeath) return;
+        if (weaponRoot == null) return;
+
+        weaponRoot.SetParent(null, true);
+        if (weaponDropUpOffset != 0f)
+            weaponRoot.position += Vector3.up * weaponDropUpOffset;
+
+        Rigidbody rb = weaponRoot.GetComponent<Rigidbody>();
+        if (rb == null)
+            rb = weaponRoot.gameObject.AddComponent<Rigidbody>();
+
+        rb.isKinematic = false;
+        rb.useGravity = true;
+        rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
+
+        if (disableWeaponTriggerCollidersOnDrop)
+        {
+            Collider[] cols = weaponRoot.GetComponentsInChildren<Collider>();
+            for (int i = 0; i < cols.Length; i++)
+            {
+                Collider c = cols[i];
+                if (c == null) continue;
+                if (c.isTrigger)
+                    c.enabled = false;
+            }
+        }
+    }
 
     private bool AnimatorHasBool(string name)
     {
@@ -163,8 +200,14 @@ public class Health : MonoBehaviour, IDamageable
 
             isDead = true;
 
+            DropWeaponIfConfigured();
+
             if (audioSource != null && dieClip != null)
+            {
+                if (logAudio && (CompareTag("Enemy") || transform.root.CompareTag("Enemy")))
+                    Debug.Log($"[Health] AUDIO PlayOneShot DIE clip='{dieClip.name}' time={Time.time:F3} obj='{name}' root='{transform.root.name}' instigator='{(instigator != null ? instigator.name : "null")}'", this);
                 audioSource.PlayOneShot(dieClip);
+            }
 
             onDeath?.Invoke();
             return;
@@ -177,7 +220,11 @@ public class Health : MonoBehaviour, IDamageable
             animator.SetTrigger(hurtTrigger);
 
         if (audioSource != null && hurtClip != null)
+        {
+            if (logAudio && (CompareTag("Enemy") || transform.root.CompareTag("Enemy")))
+                Debug.Log($"[Health] AUDIO PlayOneShot HURT clip='{hurtClip.name}' time={Time.time:F3} obj='{name}' root='{transform.root.name}' amount={amount} instigator='{(instigator != null ? instigator.name : "null")}'", this);
             audioSource.PlayOneShot(hurtClip);
+        }
 
         onHurt?.Invoke();
     }

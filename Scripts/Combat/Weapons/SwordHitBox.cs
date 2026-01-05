@@ -181,6 +181,12 @@ public class SwordHitbox : MonoBehaviour
         if (other == null) return;
         if (Time.time < _nextHitTime) return;
 
+        if (ownerRoot != null)
+        {
+            Health ownerHealth = ownerRoot.GetComponentInChildren<Health>();
+            if (ownerHealth != null && ownerHealth.isDead) return;
+        }
+
         // Don’t hit yourself / your own rig
         if (other.transform.root.gameObject == ownerRoot) return;
 
@@ -191,52 +197,97 @@ public class SwordHitbox : MonoBehaviour
             LogContact($"CONTACT. Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' Collider='{other.name}' Root='{other.transform.root.name}' isSword={isOtherSword} isDamageable={isOtherDamageable}");
         }
 
+        bool isSwordTag = other.CompareTag("Sword") || other.transform.root.CompareTag("Sword");
+
         // 1) Sword vs Sword (block)
         // If the other object has a SwordHitbox, treat as a blade clash
         SwordHitbox otherSword = other.GetComponentInParent<SwordHitbox>();
-        if (otherSword != null && otherSword.ownerRoot != ownerRoot)
+        if ((otherSword != null && otherSword.ownerRoot != ownerRoot) || (otherSword == null && isSwordTag))
         {
+            GameObject defenderRoot = otherSword != null
+                ? otherSword.ownerRoot
+                : other.transform.root.gameObject;
+
+            if (defenderRoot == null || defenderRoot == ownerRoot) return;
+
+            Health defenderHealth = defenderRoot.GetComponentInChildren<Health>();
+            if (defenderHealth != null && defenderHealth.isDead) return;
+
+            string defenderLabel = defenderRoot != null
+                ? defenderRoot.name
+                : (otherSword != null ? otherSword.name : other.transform.root.name);
+
             if (IsIgnoringBlock())
             {
-                LogContact($"Sword->Sword ignored (ignore block window). Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' Defender='{(otherSword.ownerRoot != null ? otherSword.ownerRoot.name : otherSword.name)}'");
+                LogContact($"Sword->Sword ignored (ignore block window). Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' Defender='{defenderLabel}'");
                 return;
             }
 
             CombatResolver attackerResolver = ownerRoot != null ? ownerRoot.GetComponentInChildren<CombatResolver>() : null;
-            CombatResolver defenderResolver = otherSword.ownerRoot != null ? otherSword.ownerRoot.GetComponentInChildren<CombatResolver>() : null;
+            CombatResolver defenderResolver = defenderRoot != null ? defenderRoot.GetComponentInChildren<CombatResolver>() : null;
+            if (attackerResolver == null || attackerResolver.swingNumber <= 0)
+            {
+                LogContact($"Sword->Sword ignored (not swinging). Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' swing={(attackerResolver != null ? attackerResolver.swingNumber : -1)} Defender='{defenderLabel}'");
+                return;
+            }
+
             if (attackerResolver != null && defenderResolver != null)
             {
                 if (defenderResolver.ResolveAttackFrom(attackerResolver) == CombatResolver.Outcome.Blocked)
                 {
-                    LogContact($"Sword->Sword BLOCK. Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' swing={attackerResolver.swingNumber} Defender='{(otherSword.ownerRoot != null ? otherSword.ownerRoot.name : otherSword.name)}' defending={defenderResolver.defending} guard={defenderResolver.guardNumber}");
+                    LogContact($"Sword->Sword BLOCK. Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' swing={attackerResolver.swingNumber} Defender='{defenderLabel}' defending={defenderResolver.defending} guard={defenderResolver.guardNumber}");
                     float ignoreDamageUntilBlock = Time.time + ignoreDamageAfterSuccessfulBlockTime;
                     _ignoreDamageUntilTime = ignoreDamageUntilBlock;
                     SetSharedIgnoreDamageUntil(ignoreDamageUntilBlock);
+
+                    float ignoreBlockUntilBlock = Time.time + ignoreBlockAfterBodyHitTime;
+                    _ignoreBlockUntilTime = ignoreBlockUntilBlock;
+                    SetSharedIgnoreBlockUntil(ignoreBlockUntilBlock);
+
                     _nextHitTime = Time.time + hitCooldown;
                     DoBlockFeedback(false);
                 }
                 else
                 {
-                    LogContact($"Sword->Sword contact (no block). Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' swing={attackerResolver.swingNumber} Defender='{(otherSword.ownerRoot != null ? otherSword.ownerRoot.name : otherSword.name)}' defending={defenderResolver.defending} guard={defenderResolver.guardNumber}");
+                    LogContact($"Sword->Sword contact (no block). Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' swing={attackerResolver.swingNumber} Defender='{defenderLabel}' defending={defenderResolver.defending} guard={defenderResolver.guardNumber}");
                 }
 
                 return;
             }
 
-            bool validBlock = otherSword.IsBlockActive() && otherSword.IsGuardingAgainst(ownerRoot.transform.position);
-            if (!validBlock)
+            if (otherSword != null)
             {
-                LogContact($"Sword->Sword contact (no block by directional/defending checks). Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' Defender='{(otherSword.ownerRoot != null ? otherSword.ownerRoot.name : otherSword.name)}'");
+                CombatResolver fallbackAttackerResolver = ownerRoot != null ? ownerRoot.GetComponentInChildren<CombatResolver>() : null;
+                if (fallbackAttackerResolver == null || fallbackAttackerResolver.swingNumber <= 0)
+                {
+                    LogContact($"Sword->Sword ignored (not swinging, fallback). Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' swing={(fallbackAttackerResolver != null ? fallbackAttackerResolver.swingNumber : -1)} Defender='{defenderLabel}'");
+                    return;
+                }
+
+                bool validBlock = otherSword.IsBlockActive() && otherSword.IsGuardingAgainst(ownerRoot.transform.position);
+                if (!validBlock)
+                {
+                    LogContact($"Sword->Sword contact (no block by directional/defending checks). Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' Defender='{defenderLabel}'");
+                    return;
+                }
+
+                LogContact($"Sword->Sword BLOCK (fallback). Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' Defender='{defenderLabel}'");
+
+                float ignoreDamageUntil = Time.time + ignoreDamageAfterSuccessfulBlockTime;
+                _ignoreDamageUntilTime = ignoreDamageUntil;
+                SetSharedIgnoreDamageUntil(ignoreDamageUntil);
+
+                float ignoreBlockUntil = Time.time + ignoreBlockAfterBodyHitTime;
+                _ignoreBlockUntilTime = ignoreBlockUntil;
+                SetSharedIgnoreBlockUntil(ignoreBlockUntil);
+
+                _nextHitTime = Time.time + hitCooldown;
+                DoBlockFeedback(false);
                 return;
             }
 
-            LogContact($"Sword->Sword BLOCK (fallback). Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' Defender='{(otherSword.ownerRoot != null ? otherSword.ownerRoot.name : otherSword.name)}'");
-
-            float ignoreDamageUntil = Time.time + ignoreDamageAfterSuccessfulBlockTime;
-            _ignoreDamageUntilTime = ignoreDamageUntil;
-            SetSharedIgnoreDamageUntil(ignoreDamageUntil);
-            _nextHitTime = Time.time + hitCooldown;
-            DoBlockFeedback(false);
+            string safeDefenderLabel = defenderRoot != null ? defenderRoot.name : "null";
+            LogContact($"Sword->Sword contact (tag only; no resolver). Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' DefenderRoot='{safeDefenderLabel}'");
             return;
         }
 
@@ -244,6 +295,9 @@ public class SwordHitbox : MonoBehaviour
         IDamageable dmg = other.GetComponentInParent<IDamageable>();
         if (dmg != null)
         {
+            Health targetHealth = other.GetComponentInParent<Health>();
+            if (targetHealth != null && targetHealth.isDead) return;
+
             if (IsIgnoringDamage())
             {
                 LogContact($"Sword->Body ignored (ignore damage window). Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' Collider='{other.name}'");
@@ -251,6 +305,11 @@ public class SwordHitbox : MonoBehaviour
             }
 
             CombatResolver attackerResolver = ownerRoot != null ? ownerRoot.GetComponentInChildren<CombatResolver>() : null;
+            if (attackerResolver == null || attackerResolver.swingNumber <= 0)
+            {
+                LogContact($"Sword->Body ignored (not swinging). Attacker='{(ownerRoot != null ? ownerRoot.name : name)}' swing={(attackerResolver != null ? attackerResolver.swingNumber : -1)} Collider='{other.name}'");
+                return;
+            }
 
             GameObject targetRoot = null;
             Health customHealth = other.GetComponentInParent<Health>();
@@ -349,7 +408,9 @@ public class SwordHitbox : MonoBehaviour
     {
         if (blockClip != null && Time.time >= _nextSwordClangTime)
         {
-            EnsureAudioSource().PlayOneShot(blockClip);
+            AudioSource src = EnsureAudioSource();
+            UnityEngine.Debug.Log($"[SwordHitbox] AUDIO PlayOneShot BLOCK clip='{blockClip.name}' time={Time.time:F3} owner='{(ownerRoot != null ? ownerRoot.name : name)}' self='{name}' root='{transform.root.name}'", this);
+            src.PlayOneShot(blockClip);
             _nextSwordClangTime = Time.time + hitCooldown;
         }
 
@@ -364,6 +425,10 @@ public class SwordHitbox : MonoBehaviour
     private void DoHitFeedback()
     {
         if (hitClip != null)
-            EnsureAudioSource().PlayOneShot(hitClip);
+        {
+            AudioSource src = EnsureAudioSource();
+            UnityEngine.Debug.Log($"[SwordHitbox] AUDIO PlayOneShot HIT clip='{hitClip.name}' time={Time.time:F3} owner='{(ownerRoot != null ? ownerRoot.name : name)}' self='{name}' root='{transform.root.name}'", this);
+            src.PlayOneShot(hitClip);
+        }
     }
 }

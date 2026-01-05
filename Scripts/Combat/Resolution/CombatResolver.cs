@@ -28,13 +28,27 @@ public class CombatResolver : MonoBehaviour, ICombatSwingReceiver
     public int swingNumber;
 
     [Header("Animator Input (Optional)")]
-    public bool readDefenseFromAnimator = true;
+    [Tooltip("If true, reads guard/defending from animator. Set to FALSE if using EnemyAnim or other scripts that control guard directly.")]
+    public bool readDefenseFromAnimator = false;
     public Animator animator;
     public string defendingBoolParam = "Defending";
     public string gsxParam = "GSX";
     public string gsyParam = "GSY";
     [Range(0f, 1f)]
     public float guardAxisThreshold = 0.25f;
+    
+    [Header("Blend Stability")]
+    [Tooltip("Only update guard from animator when blend values are stable (not mid-transition)")]
+    public bool requireStableBlendForGuardUpdate = true;
+    [Tooltip("How much the blend values can change per frame before considered 'unstable'")]
+    public float blendStabilityThreshold = 0.1f;
+
+    [Header("Swing Safety")]
+    public bool autoClearSwing;
+    public float autoClearSwingAfter = 0.35f;
+
+    [Header("Debug")]
+    public bool showDebugLogs;
 
     private int _defendingHash;
     private int _gsxHash;
@@ -42,6 +56,13 @@ public class CombatResolver : MonoBehaviour, ICombatSwingReceiver
     private bool _hasDefending;
     private bool _hasGsx;
     private bool _hasGsy;
+    
+    private float _lastGsx;
+    private float _lastGsy;
+    private bool _blendIsStable;
+
+    private int _lastSwingNumber;
+    private float _swingStartTime;
 
     void Awake()
     {
@@ -49,6 +70,31 @@ public class CombatResolver : MonoBehaviour, ICombatSwingReceiver
             animator = GetComponentInChildren<Animator>();
 
         CacheAnimatorParams();
+
+        _lastSwingNumber = swingNumber;
+        _swingStartTime = swingNumber > 0 ? Time.time : 0f;
+    }
+
+    void Update()
+    {
+        if (_lastSwingNumber <= 0 && swingNumber > 0)
+            _swingStartTime = Time.time;
+
+        if (swingNumber <= 0)
+            _swingStartTime = 0f;
+
+        if (autoClearSwing && swingNumber > 0 && autoClearSwingAfter > 0f)
+        {
+            if (_swingStartTime > 0f && Time.time - _swingStartTime >= autoClearSwingAfter)
+            {
+                if (showDebugLogs)
+                    Debug.Log($"[CombatResolver] Auto-clearing stuck swing: swing={swingNumber} elapsed={(Time.time - _swingStartTime):F3}s", this);
+                swingNumber = 0;
+                _swingStartTime = 0f;
+            }
+        }
+
+        _lastSwingNumber = swingNumber;
     }
 
     void LateUpdate()
@@ -63,7 +109,33 @@ public class CombatResolver : MonoBehaviour, ICombatSwingReceiver
         {
             float gsx = animator.GetFloat(_gsxHash);
             float gsy = animator.GetFloat(_gsyHash);
-            guardNumber = (int)GuardFromBlend(gsx, gsy);
+            
+            // Check if blend values are stable (not mid-lerp)
+            if (requireStableBlendForGuardUpdate)
+            {
+                float deltaGsx = Mathf.Abs(gsx - _lastGsx);
+                float deltaGsy = Mathf.Abs(gsy - _lastGsy);
+                _blendIsStable = deltaGsx < blendStabilityThreshold && deltaGsy < blendStabilityThreshold;
+                
+                _lastGsx = gsx;
+                _lastGsy = gsy;
+                
+                // Only update guard when blend is stable
+                if (!_blendIsStable)
+                {
+                    if (showDebugLogs)
+                        Debug.Log($"[CombatResolver] Skipping guard update - blend unstable (delta: {deltaGsx:F3}, {deltaGsy:F3})", this);
+                    return;
+                }
+            }
+            
+            Guard newGuard = GuardFromBlend(gsx, gsy);
+            int newGuardNumber = (int)newGuard;
+            
+            if (showDebugLogs && newGuardNumber != guardNumber)
+                Debug.Log($"[CombatResolver] Guard updated from animator: {guardNumber} -> {newGuardNumber} (GSX:{gsx:F2} GSY:{gsy:F2})", this);
+            
+            guardNumber = newGuardNumber;
         }
     }
 
@@ -94,28 +166,45 @@ public class CombatResolver : MonoBehaviour, ICombatSwingReceiver
 
     private Guard GuardFromBlend(float gsx, float gsy)
     {
-        if (Mathf.Abs(gsy) > Mathf.Abs(gsx) && Mathf.Abs(gsy) >= guardAxisThreshold)
+        // Left guard: GSX=0, GSY=1
+        if (Mathf.Abs(gsy) > Mathf.Abs(gsx) && gsy >= guardAxisThreshold)
             return Guard.Left;
 
-        if (Mathf.Abs(gsx) < guardAxisThreshold)
+        // If values are too small, keep current guard
+        if (Mathf.Abs(gsx) < guardAxisThreshold && Mathf.Abs(gsy) < guardAxisThreshold)
             return (Guard)Mathf.Clamp(guardNumber, 1, 3);
 
+        // High guard: GSX=1, GSY=0
+        // Right guard: GSX=-1, GSY=0
         return gsx >= 0f ? Guard.High : Guard.Right;
     }
 
     public void SetDefending(bool isDefending)
     {
         defending = isDefending;
+        
+        if (showDebugLogs)
+            Debug.Log($"[CombatResolver] SetDefending: {isDefending}", this);
     }
 
     public void SetGuard(Guard guard)
     {
-        guardNumber = (int)guard;
+        int newGuardNumber = (int)guard;
+        
+        if (showDebugLogs && newGuardNumber != guardNumber)
+            Debug.Log($"[CombatResolver] SetGuard: {(Guard)guardNumber} -> {guard}", this);
+        
+        guardNumber = newGuardNumber;
     }
 
     public void SetSwing(Swing swing)
     {
-        swingNumber = (int)swing;
+        int newSwingNumber = (int)swing;
+        
+        if (showDebugLogs)
+            Debug.Log($"[CombatResolver] SetSwing: {swing} (number: {newSwingNumber})", this);
+        
+        swingNumber = newSwingNumber;
     }
 
     public static int GuardToNumber(Guard guard)
@@ -174,7 +263,16 @@ public class CombatResolver : MonoBehaviour, ICombatSwingReceiver
     public Outcome ResolveAttackFrom(CombatResolver attacker)
     {
         if (attacker == null) return Outcome.Hit;
-        return ResolveAttack(attacker.swingNumber, defending, guardNumber);
+        
+        Outcome result = ResolveAttack(attacker.swingNumber, defending, guardNumber);
+        
+        if (showDebugLogs)
+        {
+            Guard requiredGuard = RequiredGuardForSwingNumber(attacker.swingNumber);
+            Debug.Log($"[CombatResolver] ResolveAttackFrom: swing={attacker.swingNumber} ({(Swing)attacker.swingNumber}) requires guard={requiredGuard}, defender defending={defending} guard={guardNumber} ({(Guard)guardNumber}) -> {result}", this);
+        }
+        
+        return result;
     }
 
     public void SetSwingNumber(int number)
@@ -221,4 +319,39 @@ public class CombatResolver : MonoBehaviour, ICombatSwingReceiver
     {
         guardNumber = (int)Guard.Right;
     }
+
+    public void ResetCombatState(bool resetDefending = true, Guard resetGuard = Guard.High)
+    {
+        if (showDebugLogs)
+            Debug.Log($"[CombatResolver] ResetCombatState called. defending={resetDefending}, guard={resetGuard}", this);
+        
+        defending = resetDefending;
+        guardNumber = (int)resetGuard;
+        swingNumber = 0;
+        
+        _lastGsx = 0f;
+        _lastGsy = 0f;
+        _blendIsStable = false;
+    }
+
+    public void ResetToDefending(Guard guard)
+    {
+        if (showDebugLogs)
+            Debug.Log($"[CombatResolver] ResetToDefending: guard={guard}", this);
+        
+        defending = true;
+        guardNumber = (int)guard;
+        swingNumber = 0;
+    }
+
+    public void ForceSync(bool isDefending, int guard)
+    {
+        if (showDebugLogs)
+            Debug.Log($"[CombatResolver] ForceSync: defending={isDefending}, guard={guard}", this);
+        
+        defending = isDefending;
+        guardNumber = guard;
+    }
 }
+
+
